@@ -2,6 +2,9 @@ import pool from "@/lib/db/pool";
 
 import {
     API_ERROR_CODE,
+    API_MESSAGE,
+    API_STATUS,
+    HTTP_STATUS,
     type ApiResponse,
 } from "@/types/api";
 
@@ -25,24 +28,24 @@ export async function GET(): Promise<Response> {
         };
 
         const response: ApiResponse<DatabaseHealth> = {
-            status: "success",
+            status: API_STATUS.SUCCESS,
             data,
         };
 
         return Response.json(response, {
-            status: 200,
+            status: HTTP_STATUS.OK,
         });
     } catch (error) {
         console.error("Database health check failed:", error);
 
         const response: ApiResponse<DatabaseHealth> = {
-            status: "error",
+            status: API_STATUS.ERROR,
             code: API_ERROR_CODE.DATABASE_UNAVAILABLE,
-            message: "Database unavailable",
+            message: API_MESSAGE.DATABASE_UNAVAILABLE,
         };
 
         return Response.json(response, {
-            status: 503,
+            status: HTTP_STATUS.SERVICE_UNAVAILABLE,
         });
     }
 }
