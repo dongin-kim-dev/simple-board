@@ -9,6 +9,7 @@ import {
     HTTP_STATUS,
     type ApiResponse,
 } from "@/types/api";
+import { createHash, randomBytes } from "crypto";
 
 type LoginBody = {
     email?: unknown;
@@ -136,7 +137,43 @@ export async function POST(request: Request): Promise<Response> {
             });
         }
 
-        // 아직 로그인 세션은 생성하지 않음
+        // 세션 토큰 생성
+        const sessionToken = randomBytes(32).toString("hex");
+
+        // DB에 저장할 토큰 해시 생성
+        const tokenHash = createHash("sha256")
+            .update(sessionToken)
+            .digest("hex");
+
+        // 세션 유효기간: 7일
+        const expiresAt = new Date(
+            Date.now() + 7 * 24 * 60 * 60 * 1000
+        );
+
+        // 세션 생성
+        try {
+            await pool.query(
+                `
+                INSERT INTO public.sessions
+                (user_id, token, expires_at)
+                VALUES ($1, $2, $3)
+                `,
+                [user.id, tokenHash, expiresAt]
+            );
+        } catch (error) {
+            console.error("Session creation failed:", error);
+
+            const response: ApiResponse<LoginResult> = {
+                status: API_STATUS.ERROR,
+                code: API_ERROR_CODE.INTERNAL_ERROR,
+                message: API_MESSAGE.INTERNAL_ERROR,
+            };
+
+            return Response.json(response, {
+                status: HTTP_STATUS.INTERNAL_ERROR,
+            });
+        }
+
         const response: ApiResponse<LoginResult> = {
             status: API_STATUS.SUCCESS,
             data: {
@@ -146,9 +183,18 @@ export async function POST(request: Request): Promise<Response> {
             },
         };
 
-        return Response.json(response, {
+        const httpResponse = Response.json(response, {
             status: HTTP_STATUS.OK,
         });
+
+        // 브라우저에 세션 쿠키 전달
+        httpResponse.headers.set(
+            "Set-Cookie",
+            `session=${sessionToken}; HttpOnly; Path=/; Max-Age=604800; SameSite=Lax${process.env.NODE_ENV === "production" ? "; Secure" : ""
+            }`
+        );
+
+        return httpResponse;
     } catch (error: unknown) {
         console.error("Login failed:", error);
 

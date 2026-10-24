@@ -1,6 +1,6 @@
 
 import pool from "@/lib/db/pool";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
     describe,
@@ -88,6 +88,9 @@ describe("로그인 API 테스트", () => {
 
     // 2. 정상 로그인
     it("정상 로그인 시 HTTP 200을 반환", async () => {
+        // 세션 유효기간 검증을 위해 로그인 직전 시간을 기록
+        const beforeLogin = Date.now();
+
         const response = await fetch(
             `${BASE_URL}/api/auth/login`,
             {
@@ -101,6 +104,9 @@ describe("로그인 API 테스트", () => {
                 }),
             }
         );
+
+        // 세션 유효기간 검증을 위해 로그인 직후 시간을 기록
+        const afterLogin = Date.now();
 
         const body = await response.json();
 
@@ -119,10 +125,66 @@ describe("로그인 API 테스트", () => {
         expect(body.data.email).toBe(TEST_USER.email);
         expect(body.data.name).toBe(TEST_USER.name);
 
+        // 로그인 응답에서 쿠키 확인
+        const setCookie = response.headers.get("set-cookie");
+
+        expect(setCookie).not.toBeNull();
+        expect(setCookie).toContain("HttpOnly");
+
+        // 쿠키의 원본 세션 토큰 추출
+        const sessionToken = setCookie?.match(/^session=([0-9a-f]{64})(?:;|$)/)?.[1];
+
+        expect(sessionToken).toBeDefined();
+
+        // 원본 토큰을 SHA-256으로 해시
+        const tokenHash = createHash("sha256")
+            .update(sessionToken!)
+            .digest("hex");
+
+        // DB에 세션이 생성되었는지 확인
+        const sessionResult = await pool.query(
+            `
+            SELECT
+                id::text AS id,
+                user_id::text AS user_id,
+                token,
+                expires_at
+            FROM public.sessions
+            WHERE token = $1
+            `,
+            [tokenHash]
+        );
+
+        // 해당 세션이 존재하는지 확인
+        expect(sessionResult.rowCount).toBe(1);
+
+        // 세션의 user_id가 로그인한 사용자의 id와 일치하는지 확인
+        expect(sessionResult.rows[0].user_id).toBe(registeredUserId);
+
+        // 세션의 토큰이 해시된 값과 일치하는지 확인
+        expect(sessionResult.rows[0].token).toBe(tokenHash);
+
+        const expiresAt = new Date(sessionResult.rows[0].expires_at).getTime();
+        const sevenDaysInMs = 7 * 24 * 60 * 60 * 1000;
+
+        // 세션 유효기간이 7일인지 확인
+        expect(expiresAt).toBeGreaterThanOrEqual(beforeLogin + sevenDaysInMs);
+        expect(expiresAt).toBeLessThanOrEqual(afterLogin + sevenDaysInMs);
+
     });
 
     // 3. 비밀번호가 틀린 경우
     it("비밀번호가 틀리면 HTTP 401을 반환", async () => {
+        // 로그인 실패 요청 전 세션 개수
+        const beforeResult = await pool.query(
+            `
+            SELECT COUNT(*)::int AS count
+            FROM public.sessions
+            WHERE user_id = $1
+            `,
+            [registeredUserId]
+        );
+
         const response = await fetch(
             `${BASE_URL}/api/auth/login`,
             {
@@ -152,6 +214,23 @@ describe("로그인 API 테스트", () => {
         // 반환된 데이터의 값이 일치하는지 확인
         expect(body.code).toBe(API_ERROR_CODE.UNAUTHORIZED);
         expect(body.message).toBe(API_MESSAGE.INVALID_CREDENTIALS);
+
+        // 세션 쿠키가 발급되지 않았는지 확인
+        expect(response.headers.get("set-cookie")).toBeNull();
+
+        const afterResult = await pool.query(
+            `
+            SELECT COUNT(*)::int AS count
+            FROM public.sessions
+            WHERE user_id = $1
+            `,
+            [registeredUserId]
+        );
+
+        // 세션 개수가 증가하지 않았는지 확인
+        expect(afterResult.rows[0].count).toBe(
+            beforeResult.rows[0].count
+        );
     });
 
     // 4. 존재하지 않는 이메일
@@ -184,10 +263,23 @@ describe("로그인 API 테스트", () => {
         // 반환된 데이터의 값이 일치하는지 확인
         expect(body.code).toBe(API_ERROR_CODE.UNAUTHORIZED);
         expect(body.message).toBe(API_MESSAGE.INVALID_CREDENTIALS);
+
+        // 세션 쿠키가 발급되지 않았는지 확인
+        expect(response.headers.get("set-cookie")).toBeNull();
     });
 
     // 5. 잘못된 입력 타입
     it("잘못된 입력 타입이면 HTTP 400을 반환", async () => {
+        // 로그인 실패 요청 전 세션 개수
+        const beforeResult = await pool.query(
+            `
+            SELECT COUNT(*)::int AS count
+            FROM public.sessions
+            WHERE user_id = $1
+            `,
+            [registeredUserId]
+        );
+
         const response = await fetch(
             `${BASE_URL}/api/auth/login`,
             {
@@ -216,10 +308,37 @@ describe("로그인 API 테스트", () => {
         // 반환된 데이터의 값이 일치하는지 확인
         expect(body.code).toBe(API_ERROR_CODE.VALIDATION_ERROR);
         expect(body.message).toBe(API_MESSAGE.VALIDATION_ERROR);
+
+        // 세션 쿠키가 발급되지 않았는지 확인
+        expect(response.headers.get("set-cookie")).toBeNull();
+
+        const afterResult = await pool.query(
+            `
+            SELECT COUNT(*)::int AS count
+            FROM public.sessions
+            WHERE user_id = $1
+            `,
+            [registeredUserId]
+        );
+
+        // 세션 개수가 증가하지 않았는지 확인
+        expect(afterResult.rows[0].count).toBe(
+            beforeResult.rows[0].count
+        );
     });
 
     // 6. 잘못된 JSON 본문
     it("잘못된 JSON이면 HTTP 400을 반환", async () => {
+        // 로그인 실패 요청 전 세션 개수
+        const beforeResult = await pool.query(
+            `
+            SELECT COUNT(*)::int AS count
+            FROM public.sessions
+            WHERE user_id = $1
+            `,
+            [registeredUserId]
+        );
+
         const response = await fetch(
             `${BASE_URL}/api/auth/login`,
             {
@@ -245,6 +364,23 @@ describe("로그인 API 테스트", () => {
         // 반환된 데이터의 값이 일치하는지 확인
         expect(body.code).toBe(API_ERROR_CODE.VALIDATION_ERROR);
         expect(body.message).toBe(API_MESSAGE.INVALID_JSON_BODY);
+
+        // 세션 쿠키가 발급되지 않았는지 확인
+        expect(response.headers.get("set-cookie")).toBeNull();
+
+        const afterResult = await pool.query(
+            `
+            SELECT COUNT(*)::int AS count
+            FROM public.sessions
+            WHERE user_id = $1
+            `,
+            [registeredUserId]
+        );
+
+        // 세션 개수가 증가하지 않았는지 확인
+        expect(afterResult.rows[0].count).toBe(
+            beforeResult.rows[0].count
+        );
     });
 
     // 7. 테스트 데이터 정리
